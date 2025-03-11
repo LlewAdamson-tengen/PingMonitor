@@ -1,0 +1,7 @@
+python-dotenv~=1.0.1
+requests~=2.32.3
+plyer~=2.1.0
+pygame~=2.5.0
+pync~=2.0.3
+notify2~=0.3.1; sys_platform == 'linux'
+win10toast~=0.9; sys_platform == 'win32'
