@@ -117,6 +117,7 @@ def play_alert_sound(sound_file):
 def monitor_url(url):
     consecutive_failures = 0
     consecutive_latency_alerts = 0
+    counter = 1  # Overall ping attempt counter
 
     while True:
         ip = resolve_url_to_ip(url)
@@ -128,36 +129,48 @@ def monitor_url(url):
         print(f"\nChecking {url} ({ip}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}:")
         success, response_time_ms = ping_host(ip)
 
-        if success:
-            print(f"Success: Response time = {response_time_ms:.2f} ms")
-
-            if response_time_ms > PING_THRESHOLD:
-                consecutive_latency_alerts += 1
-                print(f"High latency detected! ({consecutive_latency_alerts}/{ALERT_THRESHOLD})")
-
-                if consecutive_latency_alerts >= ALERT_THRESHOLD:
-                    log_to_csv(url, ip, "High Latency", response_time_ms, consecutive_latency_alerts)
-                    send_desktop_notification("High Latency Warning", f"{url} latency {response_time_ms:.2f}ms")
-                    send_email(f"{url} - High Latency Warning", f"Latency reached {response_time_ms:.2f}ms.")
-                    play_alert_sound(ALERT_SOUND_FILE)
-                    consecutive_latency_alerts = 0
-            else:
-                consecutive_latency_alerts = 0
-        else:
+        # Determine the current status explicitly
+        if not success:
+            status = "Ping Failure"
             consecutive_failures += 1
-            print(f"Ping failure! ({consecutive_failures}/{ALERT_THRESHOLD})")
+            consecutive_latency_alerts = 0  # reset latency alerts on failure
 
+            # Trigger alert if threshold reached
             if consecutive_failures >= ALERT_THRESHOLD:
-                log_to_csv(url, ip, "Ping Failure", None, consecutive_failures)
                 send_desktop_notification("Ping Failure Warning",
                                           f"Could not reach {url} after {consecutive_failures} tries.")
                 send_email(f"{url} - Ping Failure Warning",
                            f"Could not reach {url} after {consecutive_failures} attempts.")
                 play_alert_sound(ALERT_SOUND_FILE)
                 consecutive_failures = 0
+        else:
+            consecutive_failures = 0  # reset failures on successful ping
+            if response_time_ms > PING_THRESHOLD:
+                status = "High Latency"
+                consecutive_latency_alerts += 1
+
+                # Trigger alert if threshold reached
+                if consecutive_latency_alerts >= ALERT_THRESHOLD:
+                    send_desktop_notification("High Latency Warning",
+                                              f"{url} latency {response_time_ms:.2f}ms")
+                    send_email(f"{url} - High Latency Warning",
+                               f"Latency reached {response_time_ms:.2f}ms.")
+                    play_alert_sound(ALERT_SOUND_FILE)
+                    consecutive_latency_alerts = 0
+            else:
+                status = "Success"
+                consecutive_latency_alerts = 0
+
+        # Explicitly log every ping attempt to CSV (success, failure, latency issue)
+        log_to_csv(url, ip, status, response_time_ms if success else None, counter)
+
+        print(f"Logged: {status} (attempt: {counter}). Response time: "
+              f"{response_time_ms:.2f} ms" if response_time_ms else "N/A")
 
         print(f"Status counters: Latency: {consecutive_latency_alerts}, Failures: {consecutive_failures}")
         print(f"Next check in {PING_INTERVAL} seconds...")
+
+        counter += 1
         time.sleep(PING_INTERVAL)
 
 
