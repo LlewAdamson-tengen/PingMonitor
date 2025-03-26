@@ -1,12 +1,13 @@
 import csv
 import os
 import platform
-import pync  # if macOS notifications are required
+import pync
 import pygame
 import re
 import smtplib
 import socket
 import subprocess
+import threading
 import time
 
 from datetime import datetime
@@ -14,7 +15,7 @@ from dotenv import load_dotenv
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# Explicitly load configurations from sample.env
+# Load configurations
 load_dotenv(".env")
 
 SMTP_SERVER = os.getenv('SMTP_SERVER')
@@ -23,13 +24,17 @@ SENDER_EMAIL = os.getenv('SENDER_EMAIL')
 SENDER_PASSWORD = os.getenv('SENDER_PASSWORD')
 RECEIVER_EMAIL = os.getenv('RECEIVER_EMAIL')
 
-PING_THRESHOLD = float(os.getenv('PING_THRESHOLD'))  # in milliseconds, explicitly cast to float
+PING_THRESHOLD = float(os.getenv('PING_THRESHOLD'))
 ALERT_THRESHOLD = int(os.getenv('ALERT_THRESHOLD'))
 PING_INTERVAL = int(os.getenv('PING_INTERVAL'))
 NOTIFICATION_TIMEOUT = int(os.getenv('NOTIFICATION_TIMEOUT'))
 CSV_FILENAME = os.getenv('CSV_FILENAME')
-TARGET_URL = os.getenv('TARGET_URL')
+# Parse multiple URLs
+TARGET_URLS = [url.strip() for url in os.getenv('TARGET_URLS', '').split(',')]
 ALERT_SOUND_FILE = os.getenv('ALERT_SOUND_FILE')
+
+# Create a lock for CSV writing to prevent race conditions
+csv_lock = threading.Lock()
 
 
 def resolve_url_to_ip(url):
@@ -37,7 +42,7 @@ def resolve_url_to_ip(url):
     try:
         return socket.gethostbyname(url)
     except Exception as e:
-        print(f"IP resolution failed clearly: {e}")
+        print(f"IP resolution failed for {url}: {e}")
         return None
 
 
@@ -74,21 +79,22 @@ def ping_host(host):
             return True, response_time_ms
         return False, None
     except Exception as e:
-        print(f"Explicit ping failure: {e}")
+        print(f"Explicit ping failure for {host}: {e}")
         return False, None
 
 
 def log_to_csv(url, ip, status, response_time, counter):
-    file_exists = os.path.isfile(CSV_FILENAME)
     response_time_str = f"{response_time:.2f}" if response_time else "N/A"
 
-    with open(CSV_FILENAME, "a", newline="") as csvfile:
-        writer = csv.writer(csvfile)
-        if not file_exists:
-            writer.writerow(["Timestamp", "URL", "IP", "Status", "Response Time (ms)", "Count"])
+    with csv_lock:
+        file_exists = os.path.isfile(CSV_FILENAME)
+        with open(CSV_FILENAME, "a", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            if not file_exists:
+                writer.writerow(["Timestamp", "URL", "IP", "Status", "Response Time (ms)", "Count"])
 
-        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), url, ip, status, response_time_str, counter])
-    print(f"Logged: {status} (count: {counter}).")
+            writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), url, ip, status, response_time_str, counter])
+        print(f"[{url}] Logged: {status} (count: {counter}).")
 
 
 def send_desktop_notification(title, message):
@@ -122,11 +128,11 @@ def monitor_url(url):
     while True:
         ip = resolve_url_to_ip(url)
         if not ip:
-            print("IP resolution failed. Retrying...")
+            print(f"[{url}] IP resolution failed. Retrying...")
             time.sleep(PING_INTERVAL)
             continue
 
-        print(f"\nChecking {url} ({ip}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}:")
+        print(f"\n[{url}] Checking {url} ({ip}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}:")
         success, response_time_ms = ping_host(ip)
 
         # Determine the current status explicitly
@@ -137,7 +143,7 @@ def monitor_url(url):
 
             # Trigger alert if threshold reached
             if consecutive_failures >= ALERT_THRESHOLD:
-                send_desktop_notification("Ping Failure Warning",
+                send_desktop_notification(f"{url} - Ping Failure Warning",
                                           f"Could not reach {url} after {consecutive_failures} tries.")
                 send_email(f"{url} - Ping Failure Warning",
                            f"Could not reach {url} after {consecutive_failures} attempts.")
@@ -151,7 +157,7 @@ def monitor_url(url):
 
                 # Trigger alert if threshold reached
                 if consecutive_latency_alerts >= ALERT_THRESHOLD:
-                    send_desktop_notification("High Latency Warning",
+                    send_desktop_notification(f"{url} - High Latency Warning",
                                               f"{url} latency {response_time_ms:.2f}ms")
                     send_email(f"{url} - High Latency Warning",
                                f"Latency reached {response_time_ms:.2f}ms.")
@@ -164,18 +170,35 @@ def monitor_url(url):
         # Explicitly log every ping attempt to CSV (success, failure, latency issue)
         log_to_csv(url, ip, status, response_time_ms if success else None, counter)
 
-        print(f"Logged: {status} (attempt: {counter}). Response time: "
+        print(f"[{url}] Logged: {status} (attempt: {counter}). Response time: "
               f"{response_time_ms:.2f} ms" if response_time_ms else "N/A")
 
-        print(f"Status counters: Latency: {consecutive_latency_alerts}, Failures: {consecutive_failures}")
-        print(f"Next check in {PING_INTERVAL} seconds...")
+        print(f"[{url}] Status counters: Latency: {consecutive_latency_alerts}, Failures: {consecutive_failures}")
+        print(f"[{url}] Next check in {PING_INTERVAL} seconds...")
 
         counter += 1
         time.sleep(PING_INTERVAL)
 
 
+def start_monitoring():
+    """Start monitoring threads for all URLs"""
+    threads = []
+
+    for url in TARGET_URLS:
+        if url:
+            print(f"Starting monitoring for {url}")
+            thread = threading.Thread(target=monitor_url, args=(url,), daemon=True)
+            thread.start()
+            threads.append(thread)
+
+    # Keep main thread alive
+    for thread in threads:
+        thread.join()
+
+
 if __name__ == "__main__":
-    if TARGET_URL:
-        monitor_url(TARGET_URL)
+    if TARGET_URLS:
+        print(f"Starting monitoring for URLs: {', '.join(TARGET_URLS)}")
+        start_monitoring()
     else:
-        print("TARGET_URL not found in env configuration. Check sample.env.")
+        print("No TARGET_URLS found in env configuration. Check .env file.")
