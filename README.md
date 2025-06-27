@@ -347,4 +347,4 @@ MIT License © 2025 Llew Adamson
 
 ---
 
-🎉 **Thank you for using Ping Monitor! Please reachout if you have any questions or have some features you'd like to see. Happy Monitoring.**
+🎉 **Thank you for using Ping Monitor! Please reach out if you have any questions, found any bugs, or have some features you'd like to see. Happy Monitoring.**
