@@ -183,3 +183,4 @@ cython_debug/
 /.idea/vcs.xml
 /.tool-versions
 /ping_results.csv
+/.idea/sshConfigs.xml
