@@ -9,29 +9,16 @@ import socket
 import subprocess
 import threading
 import time
+import signal
+import sys
 
 from datetime import datetime
 from dotenv import load_dotenv
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# Load configurations
+# Initial configuration load
 load_dotenv(".env")
-
-SMTP_SERVER = os.getenv('SMTP_SERVER')
-SMTP_PORT = int(os.getenv('SMTP_PORT'))
-SENDER_EMAIL = os.getenv('SENDER_EMAIL')
-SENDER_PASSWORD = os.getenv('SENDER_PASSWORD')
-RECEIVER_EMAIL = os.getenv('RECEIVER_EMAIL')
-
-PING_THRESHOLD = float(os.getenv('PING_THRESHOLD'))
-ALERT_THRESHOLD = int(os.getenv('ALERT_THRESHOLD'))
-PING_INTERVAL = int(os.getenv('PING_INTERVAL'))
-NOTIFICATION_TIMEOUT = int(os.getenv('NOTIFICATION_TIMEOUT'))
-CSV_FILENAME = os.getenv('CSV_FILENAME')
-# Parse multiple URLs
-TARGET_URLS = [url.strip() for url in os.getenv('TARGET_URLS', '').split(',')]
-ALERT_SOUND_FILE = os.getenv('ALERT_SOUND_FILE')
 
 # Create a lock for CSV writing to prevent race conditions
 csv_lock = threading.Lock()
@@ -49,16 +36,26 @@ def resolve_url_to_ip(url):
 def send_email(subject, body):
     """Explicitly send an SMTP email clearly"""
     try:
+        smtp_server = os.getenv('SMTP_SERVER')
+        smtp_port = int(os.getenv('SMTP_PORT', 587))
+        sender_email = os.getenv('SENDER_EMAIL')
+        sender_password = os.getenv('SENDER_PASSWORD')
+        receiver_email = os.getenv('RECEIVER_EMAIL')
+        
+        if not all([smtp_server, sender_email, sender_password, receiver_email]):
+            print("Email configuration incomplete, skipping email alert")
+            return
+        
         msg = MIMEMultipart()
         msg.attach(MIMEText(body))
-        msg["From"] = SENDER_EMAIL
-        msg["To"] = RECEIVER_EMAIL
+        msg["From"] = sender_email
+        msg["To"] = receiver_email
         msg["Subject"] = subject
 
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
-            server.login(SENDER_EMAIL, SENDER_PASSWORD)
-            server.sendmail(SENDER_EMAIL, RECEIVER_EMAIL, msg.as_string())
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, receiver_email, msg.as_string())
         print("Email sent.")
     except Exception as e:
         print(f"Error sending email: {e}")
@@ -85,10 +82,11 @@ def ping_host(host):
 
 def log_to_csv(url, ip, status, response_time, counter):
     response_time_str = f"{response_time:.2f}" if response_time else "N/A"
+    csv_filename = os.getenv('CSV_FILENAME', 'ping_results.csv')
 
     with csv_lock:
-        file_exists = os.path.isfile(CSV_FILENAME)
-        with open(CSV_FILENAME, "a", newline="") as csvfile:
+        file_exists = os.path.isfile(csv_filename)
+        with open(csv_filename, "a", newline="") as csvfile:
             writer = csv.writer(csvfile)
             if not file_exists:
                 writer.writerow(["Timestamp", "URL", "IP", "Status", "Response Time (ms)", "Count"])
@@ -100,7 +98,8 @@ def log_to_csv(url, ip, status, response_time, counter):
 def send_desktop_notification(title, message):
     """Send desktop notification explicitly using pync (macOS); adjust as needed for other OS."""
     try:
-        pync.notify(message, title=title, timeout=NOTIFICATION_TIMEOUT)
+        notification_timeout = int(os.getenv('NOTIFICATION_TIMEOUT', 10))
+        pync.notify(message, title=title, timeout=notification_timeout)
         print(f"Desktop notification sent: {title}")
     except Exception as e:
         print(f"Desktop notification error: {e}")
@@ -120,85 +119,205 @@ def play_alert_sound(sound_file):
         print(f"Sound play issue: {e}")
 
 
-def monitor_url(url):
-    consecutive_failures = 0
-    consecutive_latency_alerts = 0
-    counter = 1  # Overall ping attempt counter
 
-    while True:
-        ip = resolve_url_to_ip(url)
-        if not ip:
-            print(f"[{url}] IP resolution failed. Retrying...")
-            time.sleep(PING_INTERVAL)
-            continue
 
-        print(f"\n[{url}] Checking {url} ({ip}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}:")
-        success, response_time_ms = ping_host(ip)
-
-        # Determine the current status explicitly
-        if not success:
-            status = "Ping Failure"
-            consecutive_failures += 1
-            consecutive_latency_alerts = 0  # reset latency alerts on failure
-
-            # Trigger alert if threshold reached
-            if consecutive_failures >= ALERT_THRESHOLD:
-                send_desktop_notification(f"{url} - Ping Failure Warning",
-                                          f"Could not reach {url} after {consecutive_failures} tries.")
-                send_email(f"{url} - Ping Failure Warning",
-                           f"Could not reach {url} after {consecutive_failures} attempts.")
-                play_alert_sound(ALERT_SOUND_FILE)
-                consecutive_failures = 0
-        else:
-            consecutive_failures = 0  # reset failures on successful ping
-            if response_time_ms > PING_THRESHOLD:
-                status = "High Latency"
-                consecutive_latency_alerts += 1
-
-                # Trigger alert if threshold reached
-                if consecutive_latency_alerts >= ALERT_THRESHOLD:
-                    send_desktop_notification(f"{url} - High Latency Warning",
-                                              f"{url} latency {response_time_ms:.2f}ms")
-                    send_email(f"{url} - High Latency Warning",
-                               f"Latency reached {response_time_ms:.2f}ms.")
-                    play_alert_sound(ALERT_SOUND_FILE)
-                    consecutive_latency_alerts = 0
-            else:
-                status = "Success"
+class DynamicPingMonitor:
+    def __init__(self):
+        self.active_threads = {}  # {url: thread}
+        self.stop_events = {}     # {url: threading.Event}
+        self.current_urls = set()
+        self.config_lock = threading.Lock()
+        self.running = True
+        
+        # Load initial configuration
+        self.reload_config()
+        
+        # Start configuration monitoring thread
+        self.config_thread = threading.Thread(target=self.monitor_config, daemon=True)
+        self.config_thread.start()
+        
+        # Setup signal handling for graceful shutdown
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+    
+    def signal_handler(self, signum, frame):
+        print("\n📡 Graceful shutdown initiated...")
+        self.shutdown()
+        sys.exit(0)
+    
+    def reload_config(self):
+        """Reload configuration from .env file"""
+        try:
+            # Reload environment variables
+            load_dotenv(".env", override=True)
+            
+            # Parse target URLs
+            target_urls_str = os.getenv('TARGET_URLS', '')
+            new_urls = set(url.strip() for url in target_urls_str.split(',') if url.strip())
+            
+            with self.config_lock:
+                # Find URLs to add and remove
+                urls_to_add = new_urls - self.current_urls
+                urls_to_remove = self.current_urls - new_urls
+                
+                # Stop monitoring for removed URLs
+                for url in urls_to_remove:
+                    self.stop_monitoring_url(url)
+                
+                # Start monitoring for new URLs
+                for url in urls_to_add:
+                    self.start_monitoring_url(url)
+                
+                # Update current URLs
+                self.current_urls = new_urls
+                
+                if urls_to_add or urls_to_remove:
+                    print(f"\n🔄 Configuration updated:")
+                    if urls_to_add:
+                        print(f"  ✅ Added: {', '.join(urls_to_add)}")
+                    if urls_to_remove:
+                        print(f"  ❌ Removed: {', '.join(urls_to_remove)}")
+                    print(f"  📍 Currently monitoring: {', '.join(self.current_urls)}")
+                    
+        except Exception as e:
+            print(f"Error reloading config: {e}")
+    
+    def monitor_config(self):
+        """Monitor .env file for changes"""
+        last_modified = 0
+        
+        while self.running:
+            try:
+                if os.path.exists('.env'):
+                    current_modified = os.path.getmtime('.env')
+                    if current_modified > last_modified:
+                        last_modified = current_modified
+                        if last_modified > 0:  # Skip initial load
+                            print("\n📄 .env file changed, reloading configuration...")
+                            self.reload_config()
+                
+                time.sleep(2)  # Check every 2 seconds
+            except Exception as e:
+                print(f"Error monitoring config: {e}")
+                time.sleep(5)
+    
+    def start_monitoring_url(self, url):
+        """Start monitoring a specific URL"""
+        if url in self.active_threads:
+            return  # Already monitoring
+        
+        print(f"🟢 Starting monitoring for {url}")
+        stop_event = threading.Event()
+        thread = threading.Thread(target=self.monitor_url_with_stop, args=(url, stop_event), daemon=True)
+        
+        self.stop_events[url] = stop_event
+        self.active_threads[url] = thread
+        thread.start()
+    
+    def stop_monitoring_url(self, url):
+        """Stop monitoring a specific URL"""
+        if url in self.stop_events:
+            print(f"🔴 Stopping monitoring for {url}")
+            self.stop_events[url].set()
+            
+            # Wait for thread to finish
+            if url in self.active_threads:
+                self.active_threads[url].join(timeout=5)
+                del self.active_threads[url]
+            
+            del self.stop_events[url]
+    
+    def monitor_url_with_stop(self, url, stop_event):
+        """Monitor URL with ability to stop via event"""
+        consecutive_failures = 0
+        consecutive_latency_alerts = 0
+        counter = 1
+        
+        while not stop_event.is_set():
+            # Reload config values for this iteration
+            ping_threshold = float(os.getenv('PING_THRESHOLD', 100))
+            alert_threshold = int(os.getenv('ALERT_THRESHOLD', 3))
+            ping_interval = int(os.getenv('PING_INTERVAL', 30))
+            
+            ip = resolve_url_to_ip(url)
+            if not ip:
+                print(f"[{url}] IP resolution failed. Retrying...")
+                if stop_event.wait(ping_interval):
+                    break
+                continue
+            
+            print(f"\n[{url}] Checking {url} ({ip}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}:")
+            success, response_time_ms = ping_host(ip)
+            
+            # Determine status
+            if not success:
+                status = "Ping Failure"
+                consecutive_failures += 1
                 consecutive_latency_alerts = 0
-
-        # Explicitly log every ping attempt to CSV (success, failure, latency issue)
-        log_to_csv(url, ip, status, response_time_ms if success else None, counter)
-
-        print(f"[{url}] Logged: {status} (attempt: {counter}). Response time: "
-              f"{response_time_ms:.2f} ms" if response_time_ms else "N/A")
-
-        print(f"[{url}] Status counters: Latency: {consecutive_latency_alerts}, Failures: {consecutive_failures}")
-        print(f"[{url}] Next check in {PING_INTERVAL} seconds...")
-
-        counter += 1
-        time.sleep(PING_INTERVAL)
-
-
-def start_monitoring():
-    """Start monitoring threads for all URLs"""
-    threads = []
-
-    for url in TARGET_URLS:
-        if url:
-            print(f"Starting monitoring for {url}")
-            thread = threading.Thread(target=monitor_url, args=(url,), daemon=True)
-            thread.start()
-            threads.append(thread)
-
-    # Keep main thread alive
-    for thread in threads:
-        thread.join()
+                
+                if consecutive_failures >= alert_threshold:
+                    send_desktop_notification(f"{url} - Ping Failure Warning",
+                                              f"Could not reach {url} after {consecutive_failures} tries.")
+                    send_email(f"{url} - Ping Failure Warning",
+                               f"Could not reach {url} after {consecutive_failures} attempts.")
+                    play_alert_sound(os.getenv('ALERT_SOUND_FILE', 'alert.mp3'))
+                    consecutive_failures = 0
+            else:
+                consecutive_failures = 0
+                if response_time_ms > ping_threshold:
+                    status = "High Latency"
+                    consecutive_latency_alerts += 1
+                    
+                    if consecutive_latency_alerts >= alert_threshold:
+                        send_desktop_notification(f"{url} - High Latency Warning",
+                                                  f"{url} latency {response_time_ms:.2f}ms")
+                        send_email(f"{url} - High Latency Warning",
+                                   f"Latency reached {response_time_ms:.2f}ms.")
+                        play_alert_sound(os.getenv('ALERT_SOUND_FILE', 'alert.mp3'))
+                        consecutive_latency_alerts = 0
+                else:
+                    status = "Success"
+                    consecutive_latency_alerts = 0
+            
+            # Log to CSV
+            log_to_csv(url, ip, status, response_time_ms if success else None, counter)
+            
+            print(f"[{url}] Status: {status} (attempt: {counter})")
+            if response_time_ms:
+                print(f"[{url}] Response time: {response_time_ms:.2f} ms")
+            print(f"[{url}] Counters - Latency: {consecutive_latency_alerts}, Failures: {consecutive_failures}")
+            
+            counter += 1
+            
+            # Wait for interval or stop signal
+            if stop_event.wait(ping_interval):
+                break
+    
+    def run(self):
+        """Run the monitoring system"""
+        try:
+            print(f"🚀 Dynamic Ping Monitor started")
+            print(f"📡 Monitoring configuration file for changes...")
+            print(f"📍 Press Ctrl+C to stop\n")
+            
+            while self.running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.shutdown()
+    
+    def shutdown(self):
+        """Shutdown all monitoring threads"""
+        print("\n🛑 Shutting down monitoring...")
+        self.running = False
+        
+        # Stop all URL monitoring
+        with self.config_lock:
+            for url in list(self.current_urls):
+                self.stop_monitoring_url(url)
+        
+        print("✅ All monitoring stopped.")
 
 
 if __name__ == "__main__":
-    if TARGET_URLS:
-        print(f"Starting monitoring for URLs: {', '.join(TARGET_URLS)}")
-        start_monitoring()
-    else:
-        print("No TARGET_URLS found in env configuration. Check .env file.")
+    monitor = DynamicPingMonitor()
+    monitor.run()
