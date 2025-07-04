@@ -1,7 +1,11 @@
 python-dotenv~=1.0.1
 requests~=2.32.3
 plyer~=2.1.0
-pygame~=2.5.0
+pygame~=2.6.1
 pync~=2.0.3
 notify2~=0.3.1; sys_platform == 'linux'
 win10toast~=0.9; sys_platform == 'win32'
+asyncpg>=0.30.0
+pydantic>=2.10.0
+fastapi>=0.115.2
+uvicorn>=0.27.1
