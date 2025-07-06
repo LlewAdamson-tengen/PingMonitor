@@ -94,6 +94,69 @@ async def create_ping_result(ping_result: PingResultCreate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create ping result: {e}")
 
+@app.get("/env-config", response_model=Dict[str, Any])
+async def serve_env_config():
+    """Serve current .env configuration"""
+    env_file = '.env'
+    config = {}
+    defaults = {
+        'SMTP_SERVER': 'smtp.gmail.com',
+        'SMTP_PORT': '587',
+        'SENDER_EMAIL': '',
+        'SENDER_PASSWORD': '',
+        'RECEIVER_EMAIL': '',
+        'PING_THRESHOLD': '100',
+        'ALERT_THRESHOLD': '3',
+        'PING_INTERVAL': '10',
+        'NOTIFICATION_TIMEOUT': '10',
+        'CSV_FILENAME': 'ping_results.csv',
+        'TARGET_URLS': 'g.co,github.com,microsoft.com',
+        'ALERT_SOUND_FILE': 'alert.mp3'
+    }
+
+    # Load .env if exists
+    if os.path.exists(env_file):
+        with open(env_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    config[key.strip()] = value.strip()
+
+    # Apply defaults
+    for key, value in defaults.items():
+        if key not in config:
+            config[key] = value
+
+    return config
+
+
+@app.post("/env-config", response_model=Dict[str, str])
+async def update_env_config(config_data: Dict[str, Any]):
+    """Update .env configuration from posted data"""
+    env_file = '.env'
+    with open(env_file, 'w') as f:
+        f.write("# SMTP Configuration\n")
+        f.write(f"SMTP_SERVER={config_data.get('SMTP_SERVER', 'smtp.gmail.com')}\n")
+        f.write(f"SMTP_PORT={config_data.get('SMTP_PORT', '587')}\n")
+        f.write(f"SENDER_EMAIL={config_data.get('SENDER_EMAIL', '')}\n")
+        f.write(f"SENDER_PASSWORD={config_data.get('SENDER_PASSWORD', '')}\n")
+        f.write(f"RECEIVER_EMAIL={config_data.get('RECEIVER_EMAIL', '')}\n")
+        f.write("\n# Ping Configuration\n")
+        f.write(f"PING_THRESHOLD={config_data.get('PING_THRESHOLD', '100')}\n")
+        f.write(f"ALERT_THRESHOLD={config_data.get('ALERT_THRESHOLD', '3')}\n")
+        f.write(f"PING_INTERVAL={config_data.get('PING_INTERVAL', '10')}\n")
+        f.write(f"NOTIFICATION_TIMEOUT={config_data.get('NOTIFICATION_TIMEOUT', '10')}\n")
+        f.write("\n# Output File\n")
+        f.write(f"CSV_FILENAME={config_data.get('CSV_FILENAME', 'ping_results.csv')}\n")
+        f.write("\n# Target URLs\n")
+        f.write(f"TARGET_URLS={config_data.get('TARGET_URLS', 'g.co,github.com,microsoft.com')}\n")
+        f.write("\n# Alert Sound\n")
+        f.write(f"ALERT_SOUND_FILE={config_data.get('ALERT_SOUND_FILE', 'alert.mp3')}\n")
+
+    return {"status": "success", "message": "Configuration updated successfully"}
+
+
 @app.get("/ping-results/", response_model=List[Dict[str, Any]])
 async def get_ping_results(
     url: Optional[str] = Query(None, description="Filter by URL"),
