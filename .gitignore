@@ -187,3 +187,4 @@ cython_debug/
 
 # ds_store files
 .DS_Store
+/.idea/*
