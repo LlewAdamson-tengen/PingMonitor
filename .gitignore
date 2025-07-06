@@ -184,3 +184,6 @@ cython_debug/
 /.tool-versions
 /ping_results.csv
 /.idea/sshConfigs.xml
+
+# ds_store files
+.DS_Store
